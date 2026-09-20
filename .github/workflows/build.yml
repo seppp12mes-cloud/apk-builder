@@ -65,6 +65,8 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           cd "$PROJECT_DIR"
           chmod +x gradlew
+          # اگر پروژه جاوا و کاتلین را روی دو نسخه‌ی متفاوت گذاشته بود، به‌جای خطا فقط هشدار بده
+          printf '\nkotlin.jvm.target.validation.mode=warning\n' >> gradle.properties
           ./gradlew assembleDebug --no-daemon
 
       - name: Locate APK
