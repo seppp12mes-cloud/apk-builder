@@ -40,6 +40,15 @@ jobs:
           mkdir -p android-project/app
           echo "${{ secrets.CSHOP_KEYSTORE_BASE64 }}" | base64 -d > android-project/app/release.keystore
 
+      - name: Verify keystore
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.CSHOP_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.CSHOP_KEY_ALIAS }}
+        run: |
+          test -f android-project/app/release.keystore || { echo "::error::Keystore file was not created"; exit 1; }
+          keytool -list -keystore android-project/app/release.keystore -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null || { echo "::error::Keystore password or key alias is wrong"; exit 1; }
+
       - name: Make gradlew executable
         run: chmod +x android-project/gradlew
 
@@ -67,6 +76,15 @@ jobs:
           [ -n "$RELEASE_APK" ] && cp "$RELEASE_APK" "dist/app-${MARKER}.apk"
           [ -n "$RELEASE_AAB" ] && cp "$RELEASE_AAB" "dist/app-${MARKER}.aab"
           ls -la dist
+
+      - name: Verify release signature
+        if: env.HAS_KEYSTORE == 'true'
+        run: |
+          APK=$(ls dist/app-*.apk | grep -v -- '-debug.apk' | head -n1)
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n1)
+          if [ -z "$APKSIGNER" ]; then echo "apksigner not found, skipping check"; exit 0; fi
+          "$APKSIGNER" verify --print-certs "$APK" | tee cert.txt
+          if grep -qi "Android Debug" cert.txt; then echo "::error::Release APK is still signed with the debug key"; exit 1; fi
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
