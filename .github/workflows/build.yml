@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      HAS_KEYSTORE: ${{ secrets.CSHOP_KEYSTORE_BASE64 != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,7 +35,7 @@ jobs:
           unzip -oq project/project.zip -d android-project
 
       - name: Restore keystore
-        if: ${{ secrets.CSHOP_KEYSTORE_BASE64 != '' }}
+        if: env.HAS_KEYSTORE == 'true'
         run: |
           mkdir -p android-project/app
           echo "${{ secrets.CSHOP_KEYSTORE_BASE64 }}" | base64 -d > android-project/app/release.keystore
