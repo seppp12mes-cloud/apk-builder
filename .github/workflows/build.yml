@@ -1,84 +1,75 @@
-name: build
+name: build-app
 
 on:
   workflow_dispatch:
     inputs:
       marker:
-        description: "شناسه‌ی یکتای این ساخت"
+        description: 'build marker / release tag'
         required: true
       mode:
-        description: "نوع ساخت: web (پیش‌فرض) یا zip"
+        description: 'build mode'
         required: false
-        default: "web"
+        default: zip
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      - name: Prepare Android SDK (already installed on the runner)
+      - name: Unpack project
         run: |
-          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
-          SDKMANAGER=$(find /usr/local/lib/android/sdk -name sdkmanager | head -n 1)
-          yes | "$SDKMANAGER" --licenses || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          rm -rf android-project
+          mkdir -p android-project
+          unzip -oq project/project.zip -d android-project
 
-      - name: Set up Node
-        if: ${{ github.event.inputs.mode != 'zip' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install Cordova
-        if: ${{ github.event.inputs.mode != 'zip' }}
-        run: npm install -g cordova
-
-      - name: Scaffold Cordova project from submitted HTML
-        if: ${{ github.event.inputs.mode != 'zip' }}
+      - name: Restore keystore
+        if: ${{ secrets.CSHOP_KEYSTORE_BASE64 != '' }}
         run: |
-          cordova create app com.example.builtapp BuiltApp
-          cp www/index.html app/www/index.html
-          cd app
-          cordova platform add android
+          mkdir -p android-project/app
+          echo "${{ secrets.CSHOP_KEYSTORE_BASE64 }}" | base64 -d > android-project/app/release.keystore
 
-      - name: Build debug APK (Cordova / web app)
-        if: ${{ github.event.inputs.mode != 'zip' }}
+      - name: Make gradlew executable
+        run: chmod +x android-project/gradlew
+
+      - name: Build debug APK
+        working-directory: android-project
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Build release APK + AAB
+        working-directory: android-project
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/android-project/app/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.CSHOP_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.CSHOP_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.CSHOP_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease bundleRelease --no-daemon --stacktrace
+
+      - name: Collect outputs
         run: |
-          cd app
-          cordova build android
+          MARKER="${{ github.event.inputs.marker }}"
+          DEBUG_APK=$(find android-project/app/build/outputs/apk/debug -name "*.apk" | head -n1)
+          RELEASE_APK=$(find android-project/app/build/outputs/apk/release -name "*.apk" | head -n1)
+          RELEASE_AAB=$(find android-project/app/build/outputs/bundle/release -name "*.aab" | head -n1)
+          mkdir -p dist
+          [ -n "$DEBUG_APK" ] && cp "$DEBUG_APK" "dist/app-${MARKER}-debug.apk"
+          [ -n "$RELEASE_APK" ] && cp "$RELEASE_APK" "dist/app-${MARKER}.apk"
+          [ -n "$RELEASE_AAB" ] && cp "$RELEASE_AAB" "dist/app-${MARKER}.aab"
+          ls -la dist
 
-      - name: Build debug APK (native Android project / Kotlin)
-        if: ${{ github.event.inputs.mode == 'zip' }}
-        run: |
-          mkdir -p app
-          unzip -q project/project.zip -d app
-          PROJECT_DIR=$(dirname "$(find app -maxdepth 3 \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)")
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          cd "$PROJECT_DIR"
-          chmod +x gradlew
-          # اگر پروژه جاوا و کاتلین را روی دو نسخه‌ی متفاوت گذاشته بود، به‌جای خطا فقط هشدار بده
-          printf '\nkotlin.jvm.target.validation.mode=warning\n' >> gradle.properties
-          ./gradlew assembleDebug --no-daemon
-
-      - name: Locate APK
-        id: apk
-        run: |
-          APK=$(find app -name "*.apk" | head -n 1)
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-
-      - name: Publish as a GitHub Release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.marker }}
-          files: ${{ steps.apk.outputs.path }}
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
