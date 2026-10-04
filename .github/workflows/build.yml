@@ -44,7 +44,14 @@ jobs:
 
       - name: Set up Android SDK (project mode)
         if: github.event.inputs.mode == 'project'
+        continue-on-error: true
         uses: android-actions/setup-android@v3
+
+      - name: Check Android SDK is available
+        if: github.event.inputs.mode == 'project'
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME" || { echo "::error::Android SDK not found on the runner"; exit 1; }
 
       - name: Set up Python (project mode, for Chaquopy)
         if: github.event.inputs.mode == 'project'
