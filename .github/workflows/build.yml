@@ -10,6 +10,14 @@ on:
         description: 'build mode'
         required: false
         default: zip
+      java:
+        description: 'JDK version'
+        required: false
+        default: '17'
+      gradle:
+        description: 'Gradle version to install (empty = use gradlew)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -26,13 +34,23 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: ${{ github.event.inputs.java || '17' }}
 
       - name: Unpack project
         run: |
           rm -rf android-project
           mkdir -p android-project
           unzip -oq project/project.zip -d android-project
+
+      - name: Set up Android SDK (project mode)
+        if: github.event.inputs.mode == 'project'
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle (project mode, no wrapper jar)
+        if: github.event.inputs.mode == 'project' && github.event.inputs.gradle != ''
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ github.event.inputs.gradle }}
 
       - name: Restore keystore
         if: env.HAS_KEYSTORE == 'true'
@@ -50,13 +68,15 @@ jobs:
           keytool -list -keystore android-project/app/release.keystore -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null || { echo "::error::Keystore password or key alias is wrong"; exit 1; }
 
       - name: Make gradlew executable
-        run: chmod +x android-project/gradlew
+        run: chmod +x android-project/gradlew || true
 
       - name: Build debug APK
+        if: github.event.inputs.mode != 'project'
         working-directory: android-project
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Build release APK + AAB
+        if: github.event.inputs.mode != 'project'
         working-directory: android-project
         env:
           KEYSTORE_FILE: ${{ github.workspace }}/android-project/app/release.keystore
@@ -65,12 +85,31 @@ jobs:
           KEY_PASSWORD: ${{ secrets.CSHOP_KEY_PASSWORD }}
         run: ./gradlew assembleRelease bundleRelease --no-daemon --stacktrace
 
+      - name: Build project debug APK
+        if: github.event.inputs.mode == 'project'
+        working-directory: android-project
+        run: |
+          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then G=./gradlew; else G=gradle; fi
+          $G -I cshop-init.gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Build project release APK + AAB
+        if: github.event.inputs.mode == 'project' && env.HAS_KEYSTORE == 'true'
+        working-directory: android-project
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/android-project/app/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.CSHOP_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.CSHOP_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.CSHOP_KEY_PASSWORD }}
+        run: |
+          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then G=./gradlew; else G=gradle; fi
+          $G -I cshop-init.gradle assembleRelease bundleRelease --no-daemon --stacktrace
+
       - name: Collect outputs
         run: |
           MARKER="${{ github.event.inputs.marker }}"
-          DEBUG_APK=$(find android-project/app/build/outputs/apk/debug -name "*.apk" | head -n1)
-          RELEASE_APK=$(find android-project/app/build/outputs/apk/release -name "*.apk" | head -n1)
-          RELEASE_AAB=$(find android-project/app/build/outputs/bundle/release -name "*.aab" | head -n1)
+          DEBUG_APK=$(find android-project -path '*/build/outputs/apk/debug/*.apk' | head -n1)
+          RELEASE_APK=$(find android-project -path '*/build/outputs/apk/release/*.apk' | head -n1)
+          RELEASE_AAB=$(find android-project -path '*/build/outputs/bundle/release/*.aab' | head -n1)
           mkdir -p dist
           [ -n "$DEBUG_APK" ] && cp "$DEBUG_APK" "dist/app-${MARKER}-debug.apk"
           [ -n "$RELEASE_APK" ] && cp "$RELEASE_APK" "dist/app-${MARKER}.apk"
