@@ -46,6 +46,12 @@ jobs:
         if: github.event.inputs.mode == 'project'
         uses: android-actions/setup-android@v3
 
+      - name: Set up Python (project mode, for Chaquopy)
+        if: github.event.inputs.mode == 'project'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Set up Gradle (project mode, no wrapper jar)
         if: github.event.inputs.mode == 'project' && github.event.inputs.gradle != ''
         uses: gradle/actions/setup-gradle@v4
