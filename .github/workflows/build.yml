@@ -18,6 +18,10 @@ on:
         description: 'Gradle version to install (empty = use gradlew)'
         required: false
         default: ''
+      godot:
+        description: 'Godot version (godot mode)'
+        required: false
+        default: '4.3'
 
 jobs:
   build:
@@ -43,12 +47,12 @@ jobs:
           unzip -oq project/project.zip -d android-project
 
       - name: Set up Android SDK (project mode)
-        if: github.event.inputs.mode == 'project'
+        if: github.event.inputs.mode == 'project' || github.event.inputs.mode == 'godot'
         continue-on-error: true
         uses: android-actions/setup-android@v3
 
       - name: Check Android SDK is available
-        if: github.event.inputs.mode == 'project'
+        if: github.event.inputs.mode == 'project' || github.event.inputs.mode == 'godot'
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
           ls "$ANDROID_HOME" || { echo "::error::Android SDK not found on the runner"; exit 1; }
@@ -66,13 +70,13 @@ jobs:
           gradle-version: ${{ github.event.inputs.gradle }}
 
       - name: Restore keystore
-        if: env.HAS_KEYSTORE == 'true'
+        if: env.HAS_KEYSTORE == 'true' && github.event.inputs.mode != 'godot'
         run: |
           mkdir -p android-project/app
           echo "${{ secrets.CSHOP_KEYSTORE_BASE64 }}" | base64 -d > android-project/app/release.keystore
 
       - name: Verify keystore
-        if: env.HAS_KEYSTORE == 'true'
+        if: env.HAS_KEYSTORE == 'true' && github.event.inputs.mode != 'godot'
         env:
           KEYSTORE_PASSWORD: ${{ secrets.CSHOP_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.CSHOP_KEY_ALIAS }}
@@ -84,12 +88,12 @@ jobs:
         run: chmod +x android-project/gradlew || true
 
       - name: Build debug APK
-        if: github.event.inputs.mode != 'project'
+        if: github.event.inputs.mode != 'project' && github.event.inputs.mode != 'godot'
         working-directory: android-project
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Build release APK + AAB
-        if: github.event.inputs.mode != 'project'
+        if: github.event.inputs.mode != 'project' && github.event.inputs.mode != 'godot'
         working-directory: android-project
         env:
           KEYSTORE_FILE: ${{ github.workspace }}/android-project/app/release.keystore
@@ -116,6 +120,72 @@ jobs:
         run: |
           if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then G=./gradlew; else G=gradle; fi
           $G -I cshop-init.gradle assembleRelease bundleRelease --no-daemon --stacktrace
+
+      - name: Install Android SDK packages (godot mode)
+        if: github.event.inputs.mode == 'godot'
+        run: |
+          SDKM=$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platform-tools" "build-tools;33.0.2" "build-tools;34.0.0" "build-tools;35.0.1" "platforms;android-33" "platforms;android-34" "platforms;android-35" > /dev/null
+
+      - name: Install Godot and export templates (godot mode)
+        if: github.event.inputs.mode == 'godot'
+        env:
+          GODOT_VERSION: ${{ github.event.inputs.godot || '4.3' }}
+        run: |
+          V="$GODOT_VERSION"
+          BASE="https://github.com/godotengine/godot/releases/download/$V-stable"
+          mkdir -p "$HOME/godot" && cd "$HOME/godot"
+          curl -fsSL -o godot.zip "$BASE/Godot_v$V-stable_linux.x86_64.zip"
+          curl -fsSL -o templates.tpz "$BASE/Godot_v$V-stable_export_templates.tpz"
+          unzip -q godot.zip
+          mv "Godot_v$V-stable_linux.x86_64" godot
+          chmod +x godot
+          mkdir -p "$HOME/.local/share/godot/export_templates/$V.stable"
+          unzip -q templates.tpz -d tpl
+          cp -r tpl/templates/* "$HOME/.local/share/godot/export_templates/$V.stable/"
+          ./godot --version
+
+      - name: Export Godot project to APK (godot mode)
+        if: github.event.inputs.mode == 'godot'
+        working-directory: android-project
+        env:
+          MARKER: ${{ github.event.inputs.marker }}
+          KS_B64: ${{ secrets.CSHOP_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.CSHOP_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.CSHOP_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.CSHOP_KEY_PASSWORD }}
+        run: |
+          GODOT="$HOME/godot/godot"
+          keytool -genkeypair -keystore "$RUNNER_TEMP/debug.keystore" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 9999 -dname "CN=Android Debug,O=Android,C=US" > /dev/null
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$RUNNER_TEMP/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+          export GODOT_ANDROID_KEYSTORE_DEBUG_PATH="$RUNNER_TEMP/debug.keystore"
+          export GODOT_ANDROID_KEYSTORE_DEBUG_USER="androiddebugkey"
+          export GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD="android"
+          "$GODOT" --headless --import > "$RUNNER_TEMP/import.log" 2>&1 || true
+          tail -n 30 "$RUNNER_TEMP/import.log"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          "$GODOT" --headless --export-debug "Android" "$GITHUB_WORKSPACE/dist/app-$MARKER-debug.apk" 2>&1 | tail -n 80 || true
+          test -s "$GITHUB_WORKSPACE/dist/app-$MARKER-debug.apk" || { echo "::error::Godot export failed (see the log above)"; exit 1; }
+          if [ "$HAS_KEYSTORE" = "true" ]; then
+            if [ "$KEY_PASS" != "$KS_PASS" ]; then echo "::warning::Godot uses one password for both keystore and key"; fi
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            export GODOT_ANDROID_KEYSTORE_RELEASE_PATH="$RUNNER_TEMP/release.keystore"
+            export GODOT_ANDROID_KEYSTORE_RELEASE_USER="$KS_ALIAS"
+            export GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD="$KS_PASS"
+            "$GODOT" --headless --export-release "Android" "$GITHUB_WORKSPACE/dist/app-$MARKER.apk" 2>&1 | tail -n 80 || true
+            test -s "$GITHUB_WORKSPACE/dist/app-$MARKER.apk" || { echo "::error::Godot release export failed (check keystore password and alias)"; exit 1; }
+          fi
 
       - name: Collect outputs
         run: |
